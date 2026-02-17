@@ -8,9 +8,9 @@
 
 using namespace std;
 
-// ==========================================
+
 // ENUMS & STRUCTS
-// ==========================================
+
 
 enum class TileType {
     EMPTY, WALL, PLAYER, GOAL, KEY, DOOR, ENEMY, HP_POT, STR_POT, DEF_POT, TELEPORTER
@@ -22,12 +22,12 @@ struct Stats {
     int def;
 };
 
-// ==========================================
+
 // CLASSES
-// ==========================================
+
 
 class Character {
-protected:
+private:
     Stats stats;
 public:
     Character(int h, int s, int d) : stats{ h, s, d } {}
@@ -55,7 +55,7 @@ public:
     int getX() const { return x; }
     int getY() const { return y; }
 };
-//
+// the dungeon structure contains the grid and a mapp
 struct Dungeon {
     string name;
     int rows;
@@ -66,7 +66,7 @@ struct Dungeon {
 };
 
 
-// GAME ENGINE
+// GAME logic and management
 
 
 class GameManager {
