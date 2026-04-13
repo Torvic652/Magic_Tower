@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <map>
-#include <cmath> // Needed for circle distance calculations
+#include <cmath> 
 
 using namespace std;
 
