@@ -8,9 +8,9 @@
 
 using namespace std;
 
-// ==========================================
-// ENUMS & STRUCTS
-// ==========================================
+
+//ENUMS & STRUCTS
+
 
 enum class TileType {
     EMPTY, WALL, PLAYER, GOAL, KEY, DOOR, ENEMY, HP_POT, STR_POT, DEF_POT, TELEPORTER, DAMAGE_FLOOR
