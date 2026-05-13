@@ -122,7 +122,7 @@ class GameManager {
 private:
     vector<Dungeon> dungeons;
 
-    // Get raw input without converting to lowercase (useful for file paths)
+    // Get raw input without converting to lowercase to make file paths easier to handle
     string getRawStringInput(const string& prompt) {
         string val;
         cout << prompt;
@@ -130,7 +130,7 @@ private:
         return val;
     }
 
-    // Custom lower-case function replacing <algorithm> and <cctype>
+    // Custom lower-case function 
     string toLower(string s) const {
         string res = "";
         for (int i = 0; i < s.length(); i++) {
@@ -270,7 +270,7 @@ private:
              << "K : Key          X : Door           E : Enemy\n"
              << "H : Health Pot   S : Strength Pot   D : Defense Pot\n"
              << "T : Teleporter   ~ : Damage Floor\n"
-             << "Type 'inspect' to look at a tile before stepping on it!\n"
+             << "Type 'inspect' to look at a tile before stepping on it!!!\n"
              << "======================\n";
 
         while (true) {
@@ -774,7 +774,7 @@ private:
             return;
         }
 
-        // 3. Write dungeon metadata (name, rows, cols)
+        //3. write the dungeon name,rows,cols
         outFile << d.name << "\n";
         outFile << d.rows << " " << d.cols << "\n";
 
@@ -788,7 +788,7 @@ private:
                 for (int k = 0; k < sanitized_text.length(); ++k) {
                     if (sanitized_text[k] == ' ') sanitized_text[k] = '_';
                 }
-                if (sanitized_text.empty()) sanitized_text = "_"; // Use placeholder for empty text
+                if (sanitized_text.empty()) sanitized_text = "_"; // placeholder for empty text
 
                 outFile << static_cast<int>(t.type) << " "
                         << t.hp << " "
