@@ -1,43 +1,58 @@
-﻿#include <iostream>
+#include <iostream>
 #include <vector>
 #include <string>
-#include <algorithm>//transform
-#include <cctype>
-#include <map>
 #include <cmath>
-#include <thread>//for sleep
-#include <chrono>//for sleep
-#include <cstdlib>//random
-#include <ctime>//seed random
-#include <climits>//min and max
+#include <fstream>
 
 using namespace std;
 
-// Cross-platform millisecond sleep
-void sleepMs(int ms) {
-    this_thread::sleep_for(chrono::milliseconds(ms));
-}
+//enum structs
 
+enum class TileType {EMPTY, WALL, PLAYER, GOAL, KEY, DOOR, ENEMY, HP_POT, STR_POT, DEF_POT, TELEPORTER, DAMAGE_FLOOR};
 
-//  ENUMS & STRUCTS
-
-
-enum class TileType {
-    EMPTY, WALL, PLAYER, GOAL, KEY, DOOR, ENEMY,
-    HP_POT, STR_POT, DEF_POT, TELEPORTER,
-    DAMAGE_FLOOR, SWITCH, SWITCH_WALL, SWITCH_DAMAGE_FLOOR
+struct Stats {
+    int hp;
+    int str;
+    int def;
 };
 
-struct Stats { int hp, str, def; };
+struct Tile {
+    TileType type;
+    int hp; // for enemies
+    int str; // for enemies
+    int def; // for enemies
+    int value; // for pots and damage floors
+    string text; //keys doors and damage floor tyes
+    int targetX, targetY; //for teleporters
 
 
-//  CLASSES
+
+
+    Tile() {
+        type = TileType::EMPTY;
+        hp = 0; str = 0; def = 0;
+        value = 0; text = "";
+        targetX = 0; targetY = 0;
+    }
+};
+
+
+struct KeyInv {
+    string type;
+    int count;
+};
+
+// CLASSES
 
 class Character {
 protected:
     Stats stats;
 public:
-    Character(int h, int s, int d) : stats{ h, s, d } {}
+    Character(int h, int s, int d) {
+        stats.hp = h;
+        stats.str = s;
+        stats.def = d;
+    }
     Stats getStats() const { return stats; }
     void modifyHealth(int amt) { stats.hp += amt; }
     void addStrength(int amt) { stats.str += amt; }
@@ -47,25 +62,44 @@ public:
 
 class Player : public Character {
 private:
-    map<string, int> keys;  // Colored key inventory
+    vector<KeyInv> keys; 
     int x, y;
 public:
     Player(int h, int s, int d) : Character(h, s, d), x(0), y(0) {}
 
     string getKeysDisplay() const {
         if (keys.empty()) return "None";
-        string res;
-        for (const auto& kv : keys)
-            if (kv.second > 0) res += kv.first + "x" + to_string(kv.second) + " ";
-        return res.empty() ? "None" : res;
+        string res = "";
+        bool hasKeys = false;
+        for (int i = 0; i < keys.size(); ++i) {
+            if (keys[i].count > 0) {
+                res += keys[i].type + ":" + to_string(keys[i].count) + " ";
+                hasKeys = true;
+            }
+        }
+        return hasKeys ? res : "None";
     }
 
-    void addKey(const string& t) { keys[t]++; }
+    void addKey(const string& type) {
+        for (int i = 0; i < keys.size(); ++i) {
+            if (keys[i].type == type) {
+                keys[i].count++;
+                return;
+            }
+        }
+        KeyInv newKey;
+        newKey.type = type;
+        newKey.count = 1;
+        keys.push_back(newKey);
+    }
 
-    // BUG FIX #5: Use find() to avoid auto-inserting zero entries
-    bool useKey(const string& t) {
-        auto it = keys.find(t);
-        if (it != keys.end() && it->second > 0) { it->second--; return true; }
+    bool useKey(const string& type) {
+        for (int i = 0; i < keys.size(); ++i) {
+            if (keys[i].type == type && keys[i].count > 0) {
+                keys[i].count--;
+                return true;
+            }
+        }
         return false;
     }
 
@@ -76,1099 +110,813 @@ public:
 
 struct Dungeon {
     string name;
-    int rows, cols;
-    vector<vector<TileType>> grid;
-
-    // Per-tile attribute maps — all keyed by {col, row} = {x, y}
-    map<pair<int, int>, pair<int, int>> teleporters;
-    map<pair<int, int>, Stats>         enemyStats;
-    map<pair<int, int>, int>           potionValues;
-    map<pair<int, int>, string>        lockTypes;        // keys and doors
-    map<pair<int, int>, string>        damageFloorTypes; // "lava","spikes","poison"
-
-    // Switch system
-    map<pair<int, int>, int> switchIndices;
-    map<pair<int, int>, int> switchWallIndices;
-    map<pair<int, int>, int> switchDamageFloorIndices;
-    map<int, bool>          switchStates;   // true = active (walls block / floors damage)
+    int rows;
+    int cols;
+    vector<vector<Tile>> grid;
 };
 
 
-//  GAME MANAGER
+// GAME ENGINE
 
 class GameManager {
 private:
     vector<Dungeon> dungeons;
 
-
-    char tileToChar(TileType t) const {
-        switch (t) {
-        case TileType::EMPTY:               return ' ';
-        case TileType::WALL:                return '#';
-        case TileType::PLAYER:              return '@';
-        case TileType::GOAL:                return 'G';
-        case TileType::KEY:                 return 'K';
-        case TileType::DOOR:                return 'X';
-        case TileType::ENEMY:               return 'E';
-        case TileType::HP_POT:              return 'H';
-        case TileType::STR_POT:             return 'S';
-        case TileType::DEF_POT:             return 'D';
-        case TileType::TELEPORTER:          return 'T';
-        case TileType::DAMAGE_FLOOR:        return '~';
-        case TileType::SWITCH:              return 'O';
-        case TileType::SWITCH_WALL:         return 'W';
-        case TileType::SWITCH_DAMAGE_FLOOR: return 'F';
-        default:                            return '?';
-        }
-    }
-
-    // Render the dungeon grid, respecting switch states
-    void printGrid(const Dungeon& d, const Player& p) const {
-        for (int i = 0; i < d.rows; i++) {
-            for (int j = 0; j < d.cols; j++) {
-                if (p.getX() == j && p.getY() == i) { cout << '@'; continue; }
-                TileType t = d.grid[i][j];
-                if (t == TileType::SWITCH_WALL && !isSwitchWallActive(d, j, i))
-                    cout << ' ';
-                else if (t == TileType::SWITCH_DAMAGE_FLOOR && !isSwitchFloorActive(d, j, i))
-                    cout << ' ';
-                else
-                    cout << tileToChar(t);
-            }
-            cout << '\n';
-        }
-    }
-
-    // Input helpers 
-
-    // This prevents aliases like "play","dungeon","enter" from inflating the valid range.
-    int getChoiceInput(const string& prompt, const map<string, int>& options) {
-        int maxNum = 0;
-        for (const auto& kv : options) maxNum = max(maxNum, kv.second);
-
-        string input;
-        while (true) {
-            cout << prompt;
-            getline(cin, input);
-            transform(input.begin(), input.end(), input.begin(), ::tolower);
-
-            try {
-                size_t pos;
-                int val = stoi(input, &pos);
-                if (pos == input.length() && val >= 1 && val <= maxNum)
-                    return val;
-            }
-            catch (...) {}
-
-            auto it = options.find(input);
-            if (it != options.end()) return it->second;
-
-            cout << "Invalid input. Enter a number (1-" << maxNum << ") or a keyword.\n";
-        }
-    }
-
-    int getIntInput(const string& prompt, int minVal = INT_MIN, int maxVal = INT_MAX) {
-        string input;
-        while (true) {
-            cout << prompt;
-            getline(cin, input);
-            try {
-                size_t pos;
-                int val = stoi(input, &pos);
-                if (pos == input.length() && val >= minVal && val <= maxVal)
-                    return val;
-            }
-            catch (...) {}
-            cout << "Invalid input. Please enter a number";
-            if (minVal != INT_MIN || maxVal != INT_MAX)
-                cout << " between " << minVal << " and " << maxVal;
-            cout << ".\n";
-        }
-    }
-
-    string getLowerStrInput(const string& prompt) {
+    // Get raw input without converting to lowercase (useful for file paths)
+    string getRawStringInput(const string& prompt) {
         string val;
         cout << prompt;
         getline(cin, val);
-        transform(val.begin(), val.end(), val.begin(), ::tolower);
         return val;
     }
 
-    // ----- Game logic helpers -----
-
-    int getDamageForFloor(const string& fType) const {
-        if (fType == "spikes") return 3;
-        if (fType == "poison") return 1;
-        return 5; // lava (default)
+    // Custom lower-case function replacing <algorithm> and <cctype>
+    string toLower(string s) const {
+        string res = "";
+        for (int i = 0; i < s.length(); i++) {
+            if (s[i] >= 'A' && s[i] <= 'Z') {
+                res += (char)(s[i] + 32);
+            } else {
+                res += s[i];
+            }
+        }
+        return res;
     }
 
-    bool isSwitchWallActive(const Dungeon& d, int col, int row) const {
-        auto it = d.switchWallIndices.find({ col, row });
-        if (it == d.switchWallIndices.end()) return true;
-        auto sit = d.switchStates.find(it->second);
-        return (sit == d.switchStates.end()) ? true : sit->second;
+    char tileToChar(TileType t) const {
+        switch (t) {
+            case TileType::EMPTY: return ' ';
+            case TileType::WALL: return '#';
+            case TileType::PLAYER: return '@';
+            case TileType::GOAL: return 'G';
+            case TileType::KEY: return 'K';
+            case TileType::DOOR: return 'X';
+            case TileType::ENEMY: return 'E';
+            case TileType::HP_POT: return 'H';
+            case TileType::STR_POT: return 'S';
+            case TileType::DEF_POT: return 'D';
+            case TileType::TELEPORTER: return 'T';
+            case TileType::DAMAGE_FLOOR: return '~';
+            default: return '?';
+        }
     }
 
-    bool isSwitchFloorActive(const Dungeon& d, int col, int row) const {
-        auto it = d.switchDamageFloorIndices.find({ col, row });
-        if (it == d.switchDamageFloorIndices.end()) return true;
-        auto sit = d.switchStates.find(it->second);
-        return (sit == d.switchStates.end()) ? true : sit->second;
+    // Still used for raw stat inputs, but not menus!
+    int getIntInput(const string& prompt) {
+        string input;
+        int val = 0;
+        bool valid = false;
+        while (!valid) {
+            cout << prompt;
+            getline(cin, input);
+            valid = true;
+            bool isNeg = false;
+            int start = 0;
+            if (input.length() > 0 && input[0] == '-') {
+                isNeg = true;
+                start = 1;
+            }
+            if (input.length() == start) valid = false; // Empty or just "-"
+            val = 0;
+            for (int i = start; i < input.length(); i++) {
+                if (input[i] >= '0' && input[i] <= '9') {
+                    val = val * 10 + (input[i] - '0');
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid) {
+                if (isNeg) val = -val;
+                return val;
+            }
+            cout << "Invalid number.\n";
+        }
+        return 0;
     }
 
-    // Turn-by-turn battle with full log
+    string getStringInput(const string& prompt) {
+        string val;
+        cout << prompt;
+        getline(cin, val);
+        return toLower(val);
+    }
+
     bool conductBattle(Player& p, Character& e) {
-        int pDmg = max(0, p.getStats().str - e.getStats().def);
-        int eDmg = max(0, e.getStats().str - p.getStats().def);
+        int pDmg = p.getStats().str - e.getStats().def;
+        if (pDmg < 0) pDmg = 0;
+        int eDmg = e.getStats().str - p.getStats().def;
+        if (eDmg < 0) eDmg = 0;
 
         cout << "\n--- BATTLE LOG ---\n";
         if (pDmg == 0) {
-            cout << "> You cannot pierce the enemy's armor!\n";
-            cout << "> You attempt to flee but take lethal damage!\n";
-            p.modifyHealth(-(p.getStats().hp + 1));
+            cout << "You cannot pierce the enemy's armor! Your attack does 0 damage.\n";
+            cout << "You perish in the ensuing counter-attacks.\n";
+            p.modifyHealth(-p.getStats().hp); 
             return false;
         }
 
         while (p.isAlive() && e.isAlive()) {
             e.modifyHealth(-pDmg);
-            cout << "> You strike the enemy for " << pDmg
-                << " damage.  Enemy HP: " << max(0, e.getStats().hp) << "\n";
-            if (!e.isAlive()) { cout << "Enemy defeated!\n"; return true; }
+            cout << "> You strike the enemy for " << pDmg << " damage. Enemy HP: " 
+                 << (e.getStats().hp > 0 ? e.getStats().hp : 0) << "\n";
+            
+            if (!e.isAlive()) {
+                cout << "Enemy defeated!\n";
+                return true;
+            }
 
             p.modifyHealth(-eDmg);
-            cout << "> Enemy strikes you for " << eDmg
-                << " damage.  Your HP: " << max(0, p.getStats().hp) << "\n";
+            cout << "> The enemy strikes you for " << eDmg << " damage. Your HP: " 
+                 << (p.getStats().hp > 0 ? p.getStats().hp : 0) << "\n";
+            
             if (!p.isAlive()) return false;
         }
         return false;
     }
 
-    // Inspect a tile — used in both gameplay and editor
-    void displayTileInfo(const Dungeon& d, int col, int row) const {
-        TileType t = d.grid[row][col];
-        cout << "\n====================================\n";
-        cout << "     OBJECT INSPECTION REPORT\n";
-        cout << "====================================\n";
-        cout << "Location : Row " << row + 1 << " | Col " << col + 1 << "\n";
-        cout << "Symbol   : '" << tileToChar(t) << "'\n";
-        cout << "--- DETAILS ---\n";
-
-        switch (t) {
-        case TileType::EMPTY:
-            cout << "Empty space. Freely passable.\n"; break;
-        case TileType::WALL:
-            cout << "Wall. Impassable.\n"; break;
-        case TileType::GOAL:
-            cout << "Goal. Reach this to complete the dungeon!\n"; break;
-
-        case TileType::KEY: {
-            string kType = d.lockTypes.count({ col,row }) ? d.lockTypes.at({ col,row }) : "default";
-            cout << "Key (" << kType << "). Opens " << kType << " doors.\n"; break;
-        }
-        case TileType::DOOR: {
-            string dType = d.lockTypes.count({ col,row }) ? d.lockTypes.at({ col,row }) : "default";
-            cout << "Locked Door. Requires a " << dType << " key.\n"; break;
-        }
-        case TileType::ENEMY: {
-            if (d.enemyStats.count({ col,row })) {
-                Stats s = d.enemyStats.at({ col,row });
-                cout << "Enemy.  HP: " << s.hp << " | STR: " << s.str << " | DEF: " << s.def << "\n";
-            }
-            else {
-                cout << "Enemy. (default stats: HP 20 | STR 5 | DEF 2)\n";
-            }
-            break;
-        }
-        case TileType::HP_POT: {
-            int v = d.potionValues.count({ col,row }) ? d.potionValues.at({ col,row }) : 20;
-            cout << "Health Potion. Restores +" << v << " HP.\n"; break;
-        }
-        case TileType::STR_POT: {
-            int v = d.potionValues.count({ col,row }) ? d.potionValues.at({ col,row }) : 2;
-            cout << "Strength Potion. Boosts +" << v << " STR.\n"; break;
-        }
-        case TileType::DEF_POT: {
-            int v = d.potionValues.count({ col,row }) ? d.potionValues.at({ col,row }) : 2;
-            cout << "Defense Potion. Boosts +" << v << " DEF.\n"; break;
-        }
-        case TileType::TELEPORTER: {
-            if (d.teleporters.count({ col,row })) {
-                auto dest = d.teleporters.at({ col,row });
-                cout << "Teleporter. Warps to Row " << dest.second + 1
-                    << " | Col " << dest.first + 1 << ".\n";
-            }
-            else {
-                cout << "Teleporter. (unlinked — broken)\n";
-            }
-            break;
-        }
-        case TileType::DAMAGE_FLOOR: {
-            string ft = d.damageFloorTypes.count({ col,row }) ? d.damageFloorTypes.at({ col,row }) : "lava";
-            cout << "Damaging Floor (" << ft << "). Deals " << getDamageForFloor(ft)
-                << " damage per step. Does NOT disappear.\n"; break;
-        }
-        case TileType::SWITCH: {
-            if (d.switchIndices.count({ col,row })) {
-                int idx = d.switchIndices.at({ col,row });
-                auto sit = d.switchStates.find(idx);
-                bool active = (sit == d.switchStates.end()) ? true : sit->second;
-                cout << "Switch (Signal #" << idx << "). Linked objects: "
-                    << (active ? "ACTIVE" : "INACTIVE") << ".\n";
-            }
-            else {
-                cout << "Switch. (no signal assigned)\n";
-            }
-            break;
-        }
-        case TileType::SWITCH_WALL: {
-            if (d.switchWallIndices.count({ col,row })) {
-                int idx = d.switchWallIndices.at({ col,row });
-                auto sit = d.switchStates.find(idx);
-                bool active = (sit == d.switchStates.end()) ? true : sit->second;
-                cout << "Switch-Controlled Wall (Signal #" << idx << "). Currently: "
-                    << (active ? "BLOCKING" : "OPEN / PASSABLE") << ".\n";
-            }
-            else {
-                cout << "Switch-Controlled Wall. (no signal)\n";
-            }
-            break;
-        }
-        case TileType::SWITCH_DAMAGE_FLOOR: {
-            if (d.switchDamageFloorIndices.count({ col,row })) {
-                int idx = d.switchDamageFloorIndices.at({ col,row });
-                auto sit = d.switchStates.find(idx);
-                bool active = (sit == d.switchStates.end()) ? true : sit->second;
-                string ft = d.damageFloorTypes.count({ col,row }) ? d.damageFloorTypes.at({ col,row }) : "lava";
-                cout << "Switch-Controlled Floor (" << ft << " " << getDamageForFloor(ft)
-                    << " dmg, Signal #" << idx << "). Currently: "
-                    << (active ? "DANGEROUS" : "SAFE") << ".\n";
-            }
-            else {
-                cout << "Switch-Controlled Damage Floor. (no signal)\n";
-            }
-            break;
-        }
-        default:
-            cout << "Unknown tile.\n";
-        }
-        cout << "====================================\n";
+    void inspectTile(Tile t) const {
+        cout << "\n[INSPECT] ";
+        if (t.type == TileType::EMPTY) cout << "Empty floor. Safe to walk.";
+        else if (t.type == TileType::WALL) cout << "A solid wall. Blocks movement.";
+        else if (t.type == TileType::GOAL) cout << "The exit! Reach it to win.";
+        else if (t.type == TileType::KEY) cout << "A " << t.text << " Key. Pick it up to open " << t.text << " doors.";
+        else if (t.type == TileType::DOOR) cout << "A locked " << t.text << " door. Requires a " << t.text << " Key.";
+        else if (t.type == TileType::ENEMY) cout << "Enemy Stats -> HP: " << t.hp << " | STR: " << t.str << " | DEF: " << t.def;
+        else if (t.type == TileType::HP_POT) cout << "Health Potion. Restores " << t.value << " HP.";
+        else if (t.type == TileType::STR_POT) cout << "Strength Potion. Grants " << t.value << " STR.";
+        else if (t.type == TileType::DEF_POT) cout << "Defense Potion. Grants " << t.value << " DEF.";
+        else if (t.type == TileType::TELEPORTER) cout << "A mysterious teleporter.";
+        else if (t.type == TileType::DAMAGE_FLOOR) cout << "Hazard: " << t.text << ". Deals " << t.value << " damage every step!";
+        cout << "\n";
     }
 
-
-    //  MAIN GAME LOOP  — returns true on victory, false on death/quit
-
-    bool playDungeonLoop(Dungeon activeDungeon, bool autoMode = false, int autoSpeed = 500) {
+    void playDungeonLoop(Dungeon activeDungeon) {
         Player p(50, 5, 2);
 
-        // Initialise all switch states to ACTIVE
-        auto initState = [&](int idx) {
-            if (!activeDungeon.switchStates.count(idx))
-                activeDungeon.switchStates[idx] = true;
-            };
-        for (auto& kv : activeDungeon.switchIndices)            initState(kv.second);
-        for (auto& kv : activeDungeon.switchWallIndices)        initState(kv.second);
-        for (auto& kv : activeDungeon.switchDamageFloorIndices) initState(kv.second);
-
-        // Find player starting position
-        for (int i = 0; i < activeDungeon.rows; i++)
-            for (int j = 0; j < activeDungeon.cols; j++)
-                if (activeDungeon.grid[i][j] == TileType::PLAYER) {
+        for (int i = 0; i < activeDungeon.rows; i++) {
+            for (int j = 0; j < activeDungeon.cols; j++) {
+                if (activeDungeon.grid[i][j].type == TileType::PLAYER) {
                     p.setPos(j, i);
-                    activeDungeon.grid[i][j] = TileType::EMPTY;
+                    activeDungeon.grid[i][j].type = TileType::EMPTY;
                 }
-
-        // Print legend once on entry (feedback: show what symbols mean)
-        if (!autoMode) {
-            cout << "\n=== DUNGEON: " << activeDungeon.name << " ===\n";
-            cout << "LEGEND:\n";
-            cout << "  @ = You (Player)    # = Wall          G = Goal (win!)\n";
-            cout << "  K = Key             X = Locked Door   E = Enemy\n";
-            cout << "  H = Health Potion   S = Str Potion    D = Def Potion\n";
-            cout << "  T = Teleporter      ~ = Damage Floor  O = Switch\n";
-            cout << "  W = Switch Wall (W=active/blocking)   F = Switch Floor (F=active/dangerous)\n";
-            cout << "CONTROLS: W=Up  A=Left  S=Down  D=Right  |  I=Inspect  Q=Quit\n\n";
+            }
         }
 
         string message = "You entered the dungeon!";
+        
+        cout << "\n=== DUNGEON LEGEND ===\n"
+             << "@ : Player       # : Wall           G : Goal\n"
+             << "K : Key          X : Door           E : Enemy\n"
+             << "H : Health Pot   S : Strength Pot   D : Defense Pot\n"
+             << "T : Teleporter   ~ : Damage Floor\n"
+             << "Type 'inspect' to look at a tile before stepping on it!\n"
+             << "======================\n";
 
         while (true) {
-            // HUD
             cout << "\n========================================\n";
-            cout << " HP: " << p.getStats().hp
-                << " | STR: " << p.getStats().str
-                << " | DEF: " << p.getStats().def << "\n";
-            cout << " Keys: [" << p.getKeysDisplay() << "]\n";
+            cout << " HP: " << p.getStats().hp << " | STR: " << p.getStats().str
+                 << " | DEF: " << p.getStats().def << "\n Keys: [" << p.getKeysDisplay() << "]\n";
             cout << "========================================\n";
 
-            printGrid(activeDungeon, p);
+            for (int i = 0; i < activeDungeon.rows; i++) {
+                for (int j = 0; j < activeDungeon.cols; j++) {
+                    if (p.getX() == j && p.getY() == i) {
+                        cout << '@';
+                    }
+                    else {
+                        cout << tileToChar(activeDungeon.grid[i][j].type);
+                    }
+                }
+                cout << "\n";
+            }
             cout << "\n> " << message << "\n\n";
             message = "";
 
-            // Input 
-            string move;
+            string move = getStringInput("Enter move (w/a/s/d) or 'inspect' or 'quit': ");
             int dx = 0, dy = 0;
 
-            if (autoMode) {
-                sleepMs(autoSpeed);
-                // Random direction
-                const int dirs[4][2] = { {0,-1},{0,1},{-1,0},{1,0} };
-                int d2 = rand() % 4;
-                dx = dirs[d2][0]; dy = dirs[d2][1];
-                const char* names[] = { "Up","Down","Left","Right" };
-                cout << "[AUTOPLAY] Moving: " << names[d2] << "\n";
+            if (move == "w") dy = -1;
+            else if (move == "s") dy = 1;
+            else if (move == "a") dx = -1;
+            else if (move == "d") dx = 1;
+            else if (move == "quit" || move == "q") {
+                cout << "Fleeing the dungeon... Returning to menu.\n";
+                return;
+            }
+            else if (move == "inspect" || move == "i") {
+                string dir = getStringInput("Which direction to inspect? (w/a/s/d): ");
+                int ix = p.getX(), iy = p.getY();
+                if (dir == "w") iy--;
+                else if (dir == "s") iy++;
+                else if (dir == "a") ix--;
+                else if (dir == "d") ix++;
+                else {
+                    message = "Invalid direction.";
+                    continue;
+                }
+                if (ix < 0 || ix >= activeDungeon.cols || iy < 0 || iy >= activeDungeon.rows) {
+                    message = "Nothing but the void there.";
+                } else {
+                    inspectTile(activeDungeon.grid[iy][ix]);
+                }
+                continue;
             }
             else {
-                move = getLowerStrInput("Move (W/A/S/D) | I=Inspect | Q=Quit: ");
-
-                if (move == "w" || move == "up" || move == "u") dy = -1;
-                else if (move == "s" || move == "down")                 dy = 1;
-                else if (move == "a" || move == "left" || move == "l") dx = -1;
-                else if (move == "d" || move == "right" || move == "r") dx = 1;
-                else if (move == "q" || move == "quit") {
-                    cout << "Returning to main menu...\n";
-                    return false;
-                }
-                else if (move == "i" || move == "inspect") {
-                    // Inspect current tile or any specific tile
-                    cout << "Inspect: C = current tile,  or enter row number to pick a tile.\n";
-                    string sub = getLowerStrInput("Choice (C / row number): ");
-                    if (sub == "c" || sub == "current") {
-                        displayTileInfo(activeDungeon, p.getX(), p.getY());
-                    }
-                    else {
-                        try {
-                            int ir = stoi(sub) - 1;
-                            int ic = getIntInput("Enter col to inspect: ", 1, activeDungeon.cols) - 1;
-                            if (ir >= 0 && ir < activeDungeon.rows)
-                                displayTileInfo(activeDungeon, ic, ir);
-                            else
-                                cout << "Row out of range.\n";
-                        }
-                        catch (...) {
-                            cout << "Invalid row.\n";
-                        }
-                    }
-                    message = "Inspection complete.";
-                    continue;
-                }
-                else {
-                    message = "Invalid input! Use W/A/S/D, I to inspect, or Q to quit.";
-                    continue;
-                }
+                message = "Invalid input! Use w/a/s/d, inspect, or quit.";
+                continue;
             }
 
             int nx = p.getX() + dx;
             int ny = p.getY() + dy;
 
-            // Boundary check
             if (nx < 0 || nx >= activeDungeon.cols || ny < 0 || ny >= activeDungeon.rows) {
-                message = "You bumped into the edge of the world!";
+                message = "You bumped into the boundaries of the world!";
                 continue;
             }
 
-            TileType target = activeDungeon.grid[ny][nx];
+            Tile targetTile = activeDungeon.grid[ny][nx];
 
-            //  Tile interactions 
-
-            // Switch-controlled wall
-            if (target == TileType::SWITCH_WALL) {
-                if (isSwitchWallActive(activeDungeon, nx, ny)) {
-                    message = "A switch-controlled wall blocks your path! (Signal #"
-                        + to_string(activeDungeon.switchWallIndices[{nx, ny}]) + ")";
-                }
-                else {
-                    p.setPos(nx, ny);
-                    message = "You walked through an inactive switch wall.";
-                }
-                continue;
-            }
-
-            // Switch-controlled damage floor
-            if (target == TileType::SWITCH_DAMAGE_FLOOR) {
-                p.setPos(nx, ny);
-                if (isSwitchFloorActive(activeDungeon, nx, ny)) {
-                    string ft = activeDungeon.damageFloorTypes.count({ nx,ny })
-                        ? activeDungeon.damageFloorTypes[{nx, ny}] : "lava";
-                    int dmg = getDamageForFloor(ft);
-                    p.modifyHealth(-dmg);
-                    message = "You stepped on active " + ft + " and took " + to_string(dmg) + " damage!";
-                    if (!p.isAlive()) {
-                        cout << "\n=== GAME OVER ===\nYou were destroyed by a hazard.\n\n";
-                        return false;
-                    }
-                }
-                else {
-                    message = "You walked over an inactive hazard floor (safe for now).";
-                }
-                continue;
-            }
-
-            // Standard tiles
-            if (target == TileType::WALL) {
+            if (targetTile.type == TileType::WALL) {
                 message = "You bumped into a wall!";
             }
-            else if (target == TileType::EMPTY) {
+            else if (targetTile.type == TileType::EMPTY) {
                 p.setPos(nx, ny);
                 message = "Moved.";
             }
-            // Switch — toggle linked objects
-            else if (target == TileType::SWITCH) {
-                p.setPos(nx, ny); // Switch is NOT destroyed
-                if (activeDungeon.switchIndices.count({ nx,ny })) {
-                    int idx = activeDungeon.switchIndices[{nx, ny}];
-                    activeDungeon.switchStates[idx] = !activeDungeon.switchStates[idx];
-                    bool nowActive = activeDungeon.switchStates[idx];
-                    message = "You toggled Switch #" + to_string(idx) + "! Linked objects now "
-                        + (nowActive ? "ACTIVE." : "INACTIVE.");
-                }
-                else {
-                    message = "You stepped on a switch... nothing happened.";
-                }
-            }
-            // Key — BUG FIX #4: disappears on pickup
-            else if (target == TileType::KEY) {
-                string kType = activeDungeon.lockTypes.count({ nx,ny })
-                    ? activeDungeon.lockTypes[{nx, ny}] : "default";
-                p.addKey(kType);
-                activeDungeon.grid[ny][nx] = TileType::EMPTY; // Key consumed
+            else if (targetTile.type == TileType::KEY) {
+                p.addKey(targetTile.text);
+                activeDungeon.grid[ny][nx].type = TileType::EMPTY;
                 p.setPos(nx, ny);
-                message = "You picked up a " + kType + " key!";
+                message = "You picked up a " + targetTile.text + " Key!";
             }
-            // Door — BUG FIX #4: disappears when unlocked
-            else if (target == TileType::DOOR) {
-                string dType = activeDungeon.lockTypes.count({ nx,ny })
-                    ? activeDungeon.lockTypes[{nx, ny}] : "default";
-                if (p.useKey(dType)) {
-                    activeDungeon.grid[ny][nx] = TileType::EMPTY;
+            else if (targetTile.type == TileType::DOOR) {
+                if (p.useKey(targetTile.text)) {
+                    activeDungeon.grid[ny][nx].type = TileType::EMPTY;
                     p.setPos(nx, ny);
-                    message = "You used a " + dType + " key and unlocked the door!";
+                    message = "You unlocked the " + targetTile.text + " door!";
                 }
                 else {
-                    message = "The door is locked. You need a " + dType + " key.";
+                    message = "The door is locked. You need a " + targetTile.text + " Key.";
                 }
             }
-            // Teleporter
-            else if (target == TileType::TELEPORTER) {
-                auto it = activeDungeon.teleporters.find({ nx, ny });
-                if (it != activeDungeon.teleporters.end()) {
-                    p.setPos(it->second.first, it->second.second);
-                    message = "*ZWOOSH* You stepped into a teleporter and warped!";
-                }
-                else {
-                    p.setPos(nx, ny);
-                    message = "This teleporter seems broken...";
-                }
+            else if (targetTile.type == TileType::TELEPORTER) {
+                p.setPos(targetTile.targetX, targetTile.targetY);
+                message = "*ZWOOSH* You stepped into a teleporter and warped!";
             }
-            // Potions — BUG FIX #4: disappear on use
-            else if (target == TileType::HP_POT || target == TileType::STR_POT || target == TileType::DEF_POT) {
-                int val = activeDungeon.potionValues.count({ nx,ny })
-                    ? activeDungeon.potionValues[{nx, ny}]
-                    : (target == TileType::HP_POT ? 20 : 2);
-                activeDungeon.grid[ny][nx] = TileType::EMPTY; // Potion consumed
+            else if (targetTile.type == TileType::HP_POT || targetTile.type == TileType::STR_POT || targetTile.type == TileType::DEF_POT) {
+                if (targetTile.type == TileType::HP_POT) { p.modifyHealth(targetTile.value); message = "Drank a Health Potion! (+" + to_string(targetTile.value) + " HP)"; }
+                else if (targetTile.type == TileType::STR_POT) { p.addStrength(targetTile.value); message = "Drank a Strength Potion! (+" + to_string(targetTile.value) + " STR)"; }
+                else if (targetTile.type == TileType::DEF_POT) { p.addDefense(targetTile.value); message = "Drank a Defense Potion! (+" + to_string(targetTile.value) + " DEF)"; }
 
-                if (target == TileType::HP_POT) {
-                    p.modifyHealth(val);
-                    message = "Drank a Health Potion! (+" + to_string(val) + " HP)";
-                }
-                else if (target == TileType::STR_POT) {
-                    p.addStrength(val);
-                    message = "Drank a Strength Potion! (+" + to_string(val) + " STR)";
-                }
-                else {
-                    p.addDefense(val);
-                    message = "Drank a Defense Potion! (+" + to_string(val) + " DEF)";
-                }
+                activeDungeon.grid[ny][nx].type = TileType::EMPTY;
                 p.setPos(nx, ny);
             }
-            // Damage floor — tile persists
-            else if (target == TileType::DAMAGE_FLOOR) {
-                string ft = activeDungeon.damageFloorTypes.count({ nx,ny })
-                    ? activeDungeon.damageFloorTypes[{nx, ny}] : "lava";
-                int dmg = getDamageForFloor(ft);
-                p.modifyHealth(-dmg);
-                p.setPos(nx, ny); // Floor does NOT disappear
-                message = "You stepped on " + ft + " and took " + to_string(dmg) + " damage!";
+            else if (targetTile.type == TileType::DAMAGE_FLOOR) {
+                p.modifyHealth(-targetTile.value);
+                p.setPos(nx, ny); // Player moves, but the tile remains a damage floor
+                message = "You stepped on " + targetTile.text + " and took " + to_string(targetTile.value) + " damage!";
+
                 if (!p.isAlive()) {
-                    cout << "\n=== GAME OVER ===\nYou succumbed to environmental hazards.\n\n";
-                    return false;
+                    cout << "\n=== GAME OVER ===\nYou succumbed to the environmental hazards.\n\n";
+                    return;
                 }
             }
-            // Enemy — BUG FIX #3: removed from grid after defeat
-            else if (target == TileType::ENEMY) {
-                Stats es = activeDungeon.enemyStats.count({ nx,ny })
-                    ? activeDungeon.enemyStats[{nx, ny}] : Stats{ 20, 5, 2 };
-                Character enemy(es.hp, es.str, es.def);
+            else if (targetTile.type == TileType::ENEMY) {
+                Character enemy(targetTile.hp, targetTile.str, targetTile.def);
+                cout << "\n[!] BATTLE INITIATED [!]\nEnemy Stats: HP " << targetTile.hp << " | STR " << targetTile.str << " | DEF " << targetTile.def << "\n";
 
-                cout << "\n[!] BATTLE INITIATED [!]\n";
-                cout << "Enemy Stats: HP " << es.hp << " | STR " << es.str << " | DEF " << es.def << "\n";
-
-                if (conductBattle(p, enemy)) {
-                    activeDungeon.grid[ny][nx] = TileType::EMPTY; // Enemy defeated & removed
+                bool win = conductBattle(p, enemy);
+                if (win) {
+                    activeDungeon.grid[ny][nx].type = TileType::EMPTY;
                     p.setPos(nx, ny);
                     message = "You defeated the enemy!";
                 }
                 else {
                     cout << "\n=== GAME OVER ===\nYou perished in battle.\n\n";
-                    return false;
+                    return;
                 }
             }
-            // Goal
-            else if (target == TileType::GOAL) {
+            else if (targetTile.type == TileType::GOAL) {
                 cout << "\n*** VICTORY! ***\nYou reached the Goal and escaped the dungeon!\n\n";
-                return true;
-            }
-
-            if (!p.isAlive()) {
-                cout << "\n=== GAME OVER ===\nYou have died.\n\n";
-                return false;
+                return;
             }
         }
     }
-
-
-    //  DUNGEON SELECTION MENU
-
 
     void loadDungeonMenu() {
-        if (dungeons.empty()) { cout << "No dungeons available!\n"; return; }
-
         cout << "\n--- Select a Dungeon ---\n";
-        map<string, int> opts;
-        for (size_t i = 0; i < dungeons.size(); ++i) {
-            cout << i + 1 << ") " << dungeons[i].name << "\n";
-            string key = dungeons[i].name;
-            transform(key.begin(), key.end(), key.begin(), ::tolower);
-            opts[key] = (int)i + 1;
-        }
-        cout << dungeons.size() + 1 << ") Back (or 'back')\n";
-        opts["back"] = (int)dungeons.size() + 1;
-
-        int choice = getChoiceInput("Enter selection: ", opts);
-        if (choice <= (int)dungeons.size())
-            playDungeonLoop(dungeons[choice - 1]);
-    }
-
-
-    //  AUTOPLAY MODE  (Extra Credit 2)
-
-
-    void autoplayMenu() {
-        if (dungeons.empty()) { cout << "No dungeons available!\n"; return; }
-
-        cout << "\n--- AUTOPLAY MODE ---\n";
-        cout << "The AI will move randomly until it wins or loses.\n\n";
-
-        // Dungeon selection
-        map<string, int> dungeonOpts;
-        for (size_t i = 0; i < dungeons.size(); ++i) {
-            cout << i + 1 << ") " << dungeons[i].name << "\n";
-            string key = dungeons[i].name;
-            transform(key.begin(), key.end(), key.begin(), ::tolower);
-            dungeonOpts[key] = (int)i + 1;
-        }
-        cout << dungeons.size() + 1 << ") Back\n";
-        dungeonOpts["back"] = (int)dungeons.size() + 1;
-
-        int dChoice = getChoiceInput("Select dungeon: ", dungeonOpts);
-        if (dChoice > (int)dungeons.size()) return;
-
-        // Speed selection
-        cout << "\nSelect autoplay speed:\n";
-        cout << "1) Fast   (200 ms)\n";
-        cout << "2) Normal (500 ms)\n";
-        cout << "3) Slow   (1000 ms)\n";
-        cout << "4) Custom\n";
-        map<string, int> speedOpts = { {"fast",1},{"normal",2},{"slow",3},{"custom",4} };
-        int sChoice = getChoiceInput("Speed: ", speedOpts);
-
-        int ms = 500;
-        if (sChoice == 1) ms = 200;
-        else if (sChoice == 2) ms = 500;
-        else if (sChoice == 3) ms = 1000;
-        else    ms = getIntInput("Enter delay in milliseconds: ", 50, 10000);
-
-        // Run (restart loop on loss)
-        while (true) {
-            cout << "\n[AUTOPLAY] Starting dungeon: " << dungeons[dChoice - 1].name << "\n";
-            bool won = playDungeonLoop(dungeons[dChoice - 1], true, ms);
-
-            if (won) {
-                cout << "[AUTOPLAY] The AI WON! Returning to menu.\n";
-                break;
+        if (dungeons.empty()) {
+            cout << "No dungeons currently in memory.\n";
+        } else {
+            for (int i = 0; i < dungeons.size(); ++i) {
+                cout << i + 1 << " - " << dungeons[i].name << "\n";
             }
-            string retry = getLowerStrInput("[AUTOPLAY] The AI lost. Try again? (yes/no): ");
-            if (retry != "yes" && retry != "y") break;
+        }
+        cout << "L - Load from file\n";
+        cout << "0 - Back\n";
+
+        while (true) {
+            string choice = getStringInput("Type the name of the dungeon, its number, 'L' to load file (or '0' for back): ");
+            if (choice == "back" || choice == "0") return;
+            
+            if (choice == "l" || choice == "load") {
+                string filepath = getRawStringInput("Enter the filename or full path to the file (with or without .dun): ");
+                
+                // Automatically append .dun if it's not already there
+                if (filepath.length() < 4 || filepath.substr(filepath.length() - 4) != ".dun") {
+                    filepath += ".dun";
+                }
+
+                Dungeon loadedDungeon;
+                if (loadDungeonFromFile(filepath, loadedDungeon)) {
+                    dungeons.push_back(loadedDungeon);
+                    cout << "Dungeon '" << loadedDungeon.name << "' loaded successfully!\n";
+                    playDungeonLoop(loadedDungeon);
+                    return;
+                }
+                continue;
+            }
+            
+            bool isNum = true;
+            for(char c : choice) { if(!isdigit(c)) isNum = false; }
+            if(isNum && !choice.empty()) {
+                int idx = stoi(choice) - 1;
+                if(idx >= 0 && idx < dungeons.size()) {
+                    playDungeonLoop(dungeons[idx]);
+                    return;
+                }
+            }
+            
+            for (int i = 0; i < dungeons.size(); ++i) {
+                if (toLower(dungeons[i].name) == choice) {
+                    playDungeonLoop(dungeons[i]);
+                    return;
+                }
+            }
+            cout << "Dungeon not found. Please type the name exactly, or 'L' to load.\n";
         }
     }
-
-
-    //  LEVEL EDITOR
-
 
     void launchLevelEditor() {
         cout << "\n--- LEVEL EDITOR ---\n";
 
-        map<string, int> modeOpts = { {"create",1},{"new",1},{"edit",2},{"load",2} };
-        int editMode = getChoiceInput("1) Create New Dungeon\n2) Edit Existing Dungeon\nSelect mode: ", modeOpts);
-
+        string editModeStr = getStringInput("Type 'new' (1) to create or 'edit' (2) to load existing: ");
+        
         Dungeon d;
-        int dIndex = -1;
-        int r, c;
+        bool isEditingExisting = false;
 
-        if (editMode == 2) {
+        if (editModeStr == "edit" || editModeStr == "2") {
+            cout << "\n--- Select Dungeon to Edit ---\n";
             if (dungeons.empty()) {
-                cout << "No existing dungeons. Starting fresh.\n";
-                editMode = 1;
-            }
-            else {
-                cout << "\n--- Select Dungeon to Edit ---\n";
-                map<string, int> editOpts;
-                for (size_t i = 0; i < dungeons.size(); ++i) {
-                    cout << i + 1 << ") " << dungeons[i].name << "\n";
-                    string key = dungeons[i].name;
-                    transform(key.begin(), key.end(), key.begin(), ::tolower);
-                    editOpts[key] = (int)i + 1;
+                cout << "No dungeons currently in memory.\n";
+            } else {
+                for (int i = 0; i < dungeons.size(); ++i) {
+                    cout << i + 1 << " - " << dungeons[i].name << "\n";
                 }
-                dIndex = getChoiceInput("Select: ", editOpts) - 1;
-                d = dungeons[dIndex];
-                r = d.rows; c = d.cols;
+            }
+            cout << "L - Load from file\n";
+            
+            bool found = false;
+            while (!found) {
+                string choice = getStringInput("Type dungeon name, number, or 'L' to load file: ");
+                
+                if (choice == "l" || choice == "load") {
+                    string filepath = getRawStringInput("Enter the filename or full path to the file (with or without .dun): ");
+                    
+                    if (filepath.length() < 4 || filepath.substr(filepath.length() - 4) != ".dun") {
+                        filepath += ".dun";
+                    }
+
+                    Dungeon loadedDungeon;
+                    if (loadDungeonFromFile(filepath, loadedDungeon)) {
+                        d = loadedDungeon;
+                        found = true;
+                        isEditingExisting = true;
+                        cout << "Dungeon '" << loadedDungeon.name << "' loaded for editing!\n";
+                        break;
+                    }
+                    continue;
+                }
+                
+                bool isNum = true;
+                for(char c : choice) { if(!isdigit(c)) isNum = false; }
+                if(isNum && !choice.empty()) {
+                    int idx = stoi(choice) - 1;
+                    if(idx >= 0 && idx < dungeons.size()) {
+                        d = dungeons[idx];
+                        found = true;
+                        isEditingExisting = true;
+                        break;
+                    }
+                }
+                for (int i = 0; i < dungeons.size(); ++i) {
+                    if (toLower(dungeons[i].name) == choice) {
+                        d = dungeons[i];
+                        found = true;
+                        isEditingExisting = true;
+                        break;
+                    }
+                }
+                if(!found) cout << "Not found. Please type a valid name, number, or 'L' to load.\n";
             }
         }
 
-        if (editMode == 1) {
-            r = getIntInput("Rows (1-50): ", 1, 50);
-            c = getIntInput("Cols (1-50): ", 1, 50);
-            d.rows = r; d.cols = c;
-            d.grid = vector<vector<TileType>>(r, vector<TileType>(c, TileType::EMPTY));
-            // Auto-border
-            for (int i = 0; i < r; ++i)
-                for (int j = 0; j < c; ++j)
-                    if (i == 0 || i == r - 1 || j == 0 || j == c - 1)
-                        d.grid[i][j] = TileType::WALL;
+        if (editModeStr == "new" || editModeStr == "1") {
+            d.rows = getIntInput("Enter number of rows (1-50): ");
+            d.cols = getIntInput("Enter number of columns (1-50): ");
+            d.grid = vector<vector<Tile>>(d.rows, vector<Tile>(d.cols));
         }
-
-        // Clear all custom data when overwriting a tile
-        auto eraseTileData = [&](int px, int py) {
-            d.enemyStats.erase({ px,py });
-            d.potionValues.erase({ px,py });
-            d.lockTypes.erase({ px,py });
-            d.damageFloorTypes.erase({ px,py });
-            d.teleporters.erase({ px,py });
-            d.switchIndices.erase({ px,py });
-            d.switchWallIndices.erase({ px,py });
-            d.switchDamageFloorIndices.erase({ px,py });
-            };
 
         while (true) {
-            // Print grid with row/col headers
             cout << "\n    ";
-            for (int j = 1; j <= c; ++j) cout << j % 10 << " ";
+            for (int j = 1; j <= d.cols; ++j) cout << j % 10 << " ";
             cout << "\n";
-            for (int i = 0; i < r; ++i) {
+            for (int i = 0; i < d.rows; ++i) {
                 cout << (i + 1 < 10 ? " " : "") << i + 1 << "| ";
-                for (int j = 0; j < c; ++j)
-                    cout << tileToChar(d.grid[i][j]) << " ";
+                for (int j = 0; j < d.cols; ++j) {
+                    cout << tileToChar(d.grid[i][j].type) << " ";
+                }
                 cout << "\n";
             }
 
             cout << "\n--- EDITOR TOOLS ---\n"
-                << "1) Single Object       2) Filled Rectangle\n"
-                << "3) Hollow Rectangle    4) Circle\n"
-                << "5) Inspect Object      6) Save & Exit\n";
+                 << "1 - single    2 - rect\n"
+                 << "3 - hollow    4 - circle\n"
+                 << "5 - inspect   6 - save\n";
 
-            map<string, int> toolOpts = {
-                {"single",1},{"object",1},{"rectangle",2},{"filled",2},
-                {"hollow",3},{"circle",4},{"inspect",5},{"save",6},{"exit",6}
-            };
-            int tool = getChoiceInput("Select tool: ", toolOpts);
+            string tool = getStringInput("Type tool name or number: ");
 
-            //  SAVE 
-            if (tool == 6) {
+            if (tool == "save" || tool == "6") {
                 int pCount = 0, gCount = 0;
-                for (const auto& row : d.grid)
-                    for (auto tile : row) {
-                        if (tile == TileType::PLAYER) pCount++;
-                        if (tile == TileType::GOAL)   gCount++;
-                    }
-                if (pCount != 1) { cout << "[!] Need exactly one Player start (@).\n"; continue; }
-                if (gCount < 1) { cout << "[!] Need at least one Goal (G).\n"; continue; }
-
-                if (editMode == 1) {
-                    cout << "Enter dungeon name: ";
-                    getline(cin, d.name);
-                    int existIdx = -1;
-                    for (size_t i = 0; i < dungeons.size(); ++i)
-                        if (dungeons[i].name == d.name) { existIdx = (int)i; break; }
-
-                    if (existIdx >= 0) {
-                        string ow = getLowerStrInput("Name exists. Overwrite? (yes/no): ");
-                        if (ow == "yes" || ow == "y") { dungeons[existIdx] = d; cout << "Dungeon updated.\n"; }
-                        else { cout << "Save cancelled.\n"; continue; }
-                    }
-                    else {
-                        dungeons.push_back(d);
-                        cout << "Dungeon '" << d.name << "' saved!\n";
+                for (int i = 0; i < d.rows; i++) {
+                    for (int j = 0; j < d.cols; j++) {
+                        if (d.grid[i][j].type == TileType::PLAYER) pCount++;
+                        if (d.grid[i][j].type == TileType::GOAL) gCount++;
                     }
                 }
-                else {
-                    cout << "Enter new name (blank to keep '" << d.name << "'): ";
-                    string newName; getline(cin, newName);
-                    if (!newName.empty()) {
-                        int existIdx = -1;
-                        for (size_t i = 0; i < dungeons.size(); ++i)
-                            if (dungeons[i].name == newName && i != (size_t)dIndex) { existIdx = (int)i; break; }
+                if (pCount != 1) {
+                    cout << "\n[!] Cannot save: Must have exactly ONE Player (@).\n";
+                    continue;
+                }
+                if (gCount < 1) {
+                    cout << "\n[!] Cannot save: Must have at least ONE Goal (G).\n";
+                    continue;
+                }
 
-                        if (existIdx >= 0) {
-                            string ow = getLowerStrInput("Name exists. Overwrite? (yes/no): ");
-                            if (ow == "yes" || ow == "y") {
-                                d.name = newName;
-                                dungeons[existIdx] = d;
-                                dungeons.erase(dungeons.begin() + dIndex);
-                                cout << "Dungeon saved as '" << newName << "'.\n";
-                            }
-                            else { cout << "Save cancelled.\n"; continue; }
-                        }
-                        else {
-                            d.name = newName;
-                            dungeons[dIndex] = d;
-                            cout << "Dungeon '" << newName << "' saved.\n";
-                        }
+                string newName = getStringInput("Enter dungeon name: ");
+                d.name = newName;
+
+                bool updated = false;
+                for (int i = 0; i < dungeons.size(); i++) {
+                    if (toLower(dungeons[i].name) == toLower(d.name)) {
+                        dungeons[i] = d;
+                        updated = true;
+                        cout << "Updated existing dungeon!\n";
+                        break;
                     }
-                    else {
-                        dungeons[dIndex] = d;
-                        cout << "Dungeon '" << d.name << "' saved.\n";
-                    }
+                }
+                if (!updated) {
+                    dungeons.push_back(d);
+                    cout << "Saved new dungeon!\n";
+                }
+                string saveLocal = getStringInput("Would you also like to save this to a local .dun file? (y/n): ");
+                if (saveLocal == "y" || saveLocal == "yes") {
+                    this->saveDungeonToFile(d);
                 }
                 break;
             }
 
-            //  INSPECT 
-            if (tool == 5) {
-                int ri = getIntInput("Row to inspect: ", 1, r) - 1;
-                int ci = getIntInput("Col to inspect: ", 1, c) - 1;
-                displayTileInfo(d, ci, ri);
-                continue;
-            }
-
-            //  OBJECT SELECTION 
-            cout << "\nAvailable Objects:\n"
-                << " 1) Empty Space       2) Wall              3) Player\n"
-                << " 4) Goal              5) Key               6) Locked Door\n"
-                << " 7) Enemy             8) Health Potion     9) Strength Potion\n"
-                << "10) Defense Potion   11) Teleporter       12) Damage Floor\n"
-                << "13) Switch           14) Switch Wall      15) Switch Dmg Floor\n\n";
-
-            string objStr = getLowerStrInput("Select object: ");
-            TileType sel = TileType::EMPTY;
-
-            if (objStr == "1" || objStr == "empty")         sel = TileType::EMPTY;
-            else if (objStr == "2" || objStr == "wall")          sel = TileType::WALL;
-            else if (objStr == "3" || objStr == "player")        sel = TileType::PLAYER;
-            else if (objStr == "4" || objStr == "goal")          sel = TileType::GOAL;
-            else if (objStr == "5" || objStr == "key")           sel = TileType::KEY;
-            else if (objStr == "6" || objStr == "door")          sel = TileType::DOOR;
-            else if (objStr == "7" || objStr == "enemy")         sel = TileType::ENEMY;
-            else if (objStr == "8" || objStr == "health")        sel = TileType::HP_POT;
-            else if (objStr == "9" || objStr == "strength")      sel = TileType::STR_POT;
-            else if (objStr == "10" || objStr == "defense")       sel = TileType::DEF_POT;
-            else if (objStr == "11" || objStr == "teleporter")    sel = TileType::TELEPORTER;
-            else if (objStr == "12" || objStr == "damage")        sel = TileType::DAMAGE_FLOOR;
-            else if (objStr == "13" || objStr == "switch")        sel = TileType::SWITCH;
-            else if (objStr == "14" || objStr == "switch wall")   sel = TileType::SWITCH_WALL;
-            else if (objStr == "15" || objStr == "switch floor")  sel = TileType::SWITCH_DAMAGE_FLOOR;
-            else { cout << "Invalid object choice!\n"; continue; }
-
-            // ----- GATHER PROPERTIES -----
-            Stats enemyStat{ 20, 5, 2 };
-            if (sel == TileType::ENEMY) {
-                cout << "-- Enemy Configuration --\n";
-                enemyStat.hp = getIntInput("HP:  ", 1);
-                enemyStat.str = getIntInput("STR: ", 0);
-                enemyStat.def = getIntInput("DEF: ", 0);
-            }
-
-            int potVal = 2;
-            if (sel == TileType::HP_POT)
-                potVal = getIntInput("HP to restore: ", 1);
-            else if (sel == TileType::STR_POT || sel == TileType::DEF_POT)
-                potVal = getIntInput("Stat boost amount: ", 1);
-
-            string lockType = "default";
-            if (sel == TileType::KEY || sel == TileType::DOOR) {
-                cout << "Enter color/type (e.g. blue, red): ";
-                getline(cin, lockType);
-                if (lockType.empty()) lockType = "default";
-            }
-
-            string floorType = "lava";
-            if (sel == TileType::DAMAGE_FLOOR || sel == TileType::SWITCH_DAMAGE_FLOOR) {
-                cout << "Enter floor type (lava=5 dmg, spikes=3 dmg, poison=1 dmg): ";
-                getline(cin, floorType);
-                if (floorType.empty()) floorType = "lava";
-            }
-
-            // ----- SPECIAL: TELEPORTER -----
-            if (sel == TileType::TELEPORTER) {
-                cout << "[Teleporters must be placed in pairs!]\n";
-                int r1 = getIntInput("Row for Teleporter A: ", 1, r) - 1;
-                int c1 = getIntInput("Col for Teleporter A: ", 1, c) - 1;
-                int r2 = getIntInput("Row for Teleporter B: ", 1, r) - 1;
-                int c2 = getIntInput("Col for Teleporter B: ", 1, c) - 1;
-                eraseTileData(c1, r1); eraseTileData(c2, r2);
-                d.grid[r1][c1] = TileType::TELEPORTER;
-                d.grid[r2][c2] = TileType::TELEPORTER;
-                d.teleporters[{c1, r1}] = { c2, r2 };
-                d.teleporters[{c2, r2}] = { c1, r1 };
-                cout << "Teleporters linked!\n";
-                continue;
-            }
-
-            // ----- SPECIAL: SWITCH (Extra Credit 1) -----
-            if (sel == TileType::SWITCH) {
-                int switchIdx = getIntInput("Enter switch signal index (0-99): ", 0, 99);
-                if (!d.switchStates.count(switchIdx)) d.switchStates[switchIdx] = true;
-
-                int swR = getIntInput("Row for switch: ", 1, r) - 1;
-                int swC = getIntInput("Col for switch: ", 1, c) - 1;
-                eraseTileData(swC, swR);
-                d.grid[swR][swC] = TileType::SWITCH;
-                d.switchIndices[{swC, swR}] = switchIdx;
-                cout << "Switch placed at Row " << swR + 1 << " Col " << swC + 1
-                    << " (Signal #" << switchIdx << ")\n";
-
-                // Link walls and floors
-                cout << "\nLink objects to this switch (they will toggle when switch is touched).\n";
-                while (true) {
-                    cout << "1) Add Switch Wall\n"
-                        << "2) Add Switch Damage Floor\n"
-                        << "3) Link existing Wall to this switch\n"
-                        << "4) Link existing Damage Floor to this switch\n"
-                        << "5) Done\n";
-                    map<string, int> linkOpts = {
-                        {"add wall",1},{"wall",1},
-                        {"add floor",2},{"floor",2},
-                        {"link wall",3},{"link floor",4},
-                        {"done",5},{"finish",5}
-                    };
-                    int lc = getChoiceInput("Choose: ", linkOpts);
-                    if (lc == 5) break;
-
-                    int lr = getIntInput("Row: ", 1, r) - 1;
-                    int lcol = getIntInput("Col: ", 1, c) - 1;
-
-                    if (lc == 1) {
-                        eraseTileData(lcol, lr);
-                        d.grid[lr][lcol] = TileType::SWITCH_WALL;
-                        d.switchWallIndices[{lcol, lr}] = switchIdx;
-                        cout << "Switch Wall added at Row " << lr + 1 << " Col " << lcol + 1 << ".\n";
-                    }
-                    else if (lc == 2) {
-                        string sft = "lava";
-                        cout << "Floor type (lava/spikes/poison): ";
-                        getline(cin, sft);
-                        if (sft.empty()) sft = "lava";
-                        eraseTileData(lcol, lr);
-                        d.grid[lr][lcol] = TileType::SWITCH_DAMAGE_FLOOR;
-                        d.switchDamageFloorIndices[{lcol, lr}] = switchIdx;
-                        d.damageFloorTypes[{lcol, lr}] = sft;
-                        cout << "Switch Floor added at Row " << lr + 1 << " Col " << lcol + 1 << ".\n";
-                    }
-                    else if (lc == 3) {
-                        if (d.grid[lr][lcol] == TileType::WALL) {
-                            d.grid[lr][lcol] = TileType::SWITCH_WALL;
-                            d.switchWallIndices[{lcol, lr}] = switchIdx;
-                            cout << "Wall at Row " << lr + 1 << " Col " << lcol + 1
-                                << " linked to Switch #" << switchIdx << ".\n";
-                        }
-                        else { cout << "No Wall found there.\n"; }
-                    }
-                    else if (lc == 4) {
-                        if (d.grid[lr][lcol] == TileType::DAMAGE_FLOOR) {
-                            d.grid[lr][lcol] = TileType::SWITCH_DAMAGE_FLOOR;
-                            d.switchDamageFloorIndices[{lcol, lr}] = switchIdx;
-                            cout << "Damage Floor at Row " << lr + 1 << " Col " << lcol + 1
-                                << " linked to Switch #" << switchIdx << ".\n";
-                        }
-                        else { cout << "No Damage Floor found there.\n"; }
-                    }
+            if (tool == "inspect" || tool == "5") {
+                int row = getIntInput("Enter row: ") - 1;
+                int col = getIntInput("Enter col: ") - 1;
+                if (row >= 0 && row < d.rows && col >= 0 && col < d.cols) {
+                    Tile t = d.grid[row][col];
+                    cout << "\n=== TILE INFO ===\n";
+                    cout << "Location: Row " << row + 1 << " Col " << col + 1 << "\n";
+                    cout << "Base Type: " << tileToChar(t.type) << "\n";
+                    inspectTile(t);
                 }
                 continue;
             }
 
-            // ----- STANDARD SHAPE PLACEMENT -----
-            auto placeTile = [&](int i, int j) {
-                eraseTileData(j, i);
-                d.grid[i][j] = sel;
-                if (sel == TileType::ENEMY)
-                    d.enemyStats[{j, i}] = enemyStat;
-                if (sel == TileType::HP_POT || sel == TileType::STR_POT || sel == TileType::DEF_POT)
-                    d.potionValues[{j, i}] = potVal;
-                if (sel == TileType::KEY || sel == TileType::DOOR)
-                    d.lockTypes[{j, i}] = lockType;
-                if (sel == TileType::DAMAGE_FLOOR)
-                    d.damageFloorTypes[{j, i}] = floorType;
-                // Switch Wall / Switch Floor need an index
-                if (sel == TileType::SWITCH_WALL) {
-                    int idx = getIntInput("Signal index for this Switch Wall: ", 0, 99);
-                    d.switchWallIndices[{j, i}] = idx;
-                    if (!d.switchStates.count(idx)) d.switchStates[idx] = true;
+            if (tool == "single" || tool == "rect" || tool == "hollow" || tool == "circle" || tool == "1" || tool == "2" || tool == "3" || tool == "4") {
+                cout << "\nAvailable Objects: empty (0), wall (1), player (2), goal (3), key (4), door (5), enemy (6), health (7), strength (8), defense (9), teleporter (10), damage (11)\n";
+                string choice = getStringInput("Type object to place (name or number): ");
+                
+                Tile newTile;
+                if (choice == "empty" || choice == "0") newTile.type = TileType::EMPTY;
+                else if (choice == "wall" || choice == "1") newTile.type = TileType::WALL;
+                else if (choice == "player" || choice == "2") newTile.type = TileType::PLAYER;
+                else if (choice == "goal" || choice == "3") newTile.type = TileType::GOAL;
+                else if (choice == "key" || choice == "4") newTile.type = TileType::KEY;
+                else if (choice == "door" || choice == "5") newTile.type = TileType::DOOR;
+                else if (choice == "enemy" || choice == "6") newTile.type = TileType::ENEMY;
+                else if (choice == "health" || choice == "7") newTile.type = TileType::HP_POT;
+                else if (choice == "strength" || choice == "8") newTile.type = TileType::STR_POT;
+                else if (choice == "defense" || choice == "9") newTile.type = TileType::DEF_POT;
+                else if (choice == "teleporter" || choice == "10") newTile.type = TileType::TELEPORTER;
+                else if (choice == "damage" || choice == "11") newTile.type = TileType::DAMAGE_FLOOR;
+                else {
+                    cout << "Invalid object!\n";
+                    continue;
                 }
-                if (sel == TileType::SWITCH_DAMAGE_FLOOR) {
-                    int idx = getIntInput("Signal index for this Switch Floor: ", 0, 99);
-                    d.switchDamageFloorIndices[{j, i}] = idx;
-                    d.damageFloorTypes[{j, i}] = floorType;
-                    if (!d.switchStates.count(idx)) d.switchStates[idx] = true;
+
+                // Collect custom values
+                if (newTile.type == TileType::ENEMY) {
+                    newTile.hp = getIntInput("Enter HP: ");
+                    newTile.str = getIntInput("Enter STR: ");
+                    newTile.def = getIntInput("Enter DEF: ");
                 }
+                if (newTile.type == TileType::HP_POT) newTile.value = getIntInput("Enter HP restore amount: ");
+                if (newTile.type == TileType::STR_POT) newTile.value = getIntInput("Enter STR boost amount: ");
+                if (newTile.type == TileType::DEF_POT) newTile.value = getIntInput("Enter DEF boost amount: ");
+                if (newTile.type == TileType::KEY || newTile.type == TileType::DOOR) {
+                    newTile.text = getStringInput("Enter lock type (e.g., blue, red): ");
+                }
+                if (newTile.type == TileType::DAMAGE_FLOOR) {
+                    string dType = getStringInput("Enter floor type (lava/spikes/poison): ");
+                    newTile.text = dType;
+                    if (dType == "lava") newTile.value = 5;
+                    else if (dType == "spikes") newTile.value = 3;
+                    else newTile.value = 1; // poison default
+                    cout << "Assigned " << newTile.value << " damage per step for " << dType << ".\n";
+                }
+
+                if (newTile.type == TileType::TELEPORTER) {
+                    cout << "Teleporters must be placed in pairs.\n";
+                    int r1 = getIntInput("Row for Tele A: ") - 1;
+                    int c1 = getIntInput("Col for Tele A: ") - 1;
+                    int r2 = getIntInput("Row for Tele B: ") - 1;
+                    int c2 = getIntInput("Col for Tele B: ") - 1;
+                    if(r1 >= 0 && r1 < d.rows && c1 >= 0 && c1 < d.cols && r2 >= 0 && r2 < d.rows && c2 >= 0 && c2 < d.cols) {
+                        d.grid[r1][c1].type = TileType::TELEPORTER;
+                        d.grid[r1][c1].targetX = c2;
+                        d.grid[r1][c1].targetY = r2;
+
+                        d.grid[r2][c2].type = TileType::TELEPORTER;
+                        d.grid[r2][c2].targetX = c1;
+                        d.grid[r2][c2].targetY = r1;
+                        cout << "Paired!\n";
+                    }
+                    continue; 
+                }
+
+                auto placeTile = [&](int i, int j) {
+                    if (i >= 0 && i < d.rows && j >= 0 && j < d.cols) {
+                        d.grid[i][j] = newTile;
+                    }
                 };
 
-            if (tool == 1) {
-                int row = getIntInput("Row: ", 1, r) - 1;
-                int col = getIntInput("Col: ", 1, c) - 1;
-                placeTile(row, col);
-            }
-            else if (tool == 2 || tool == 3) {
-                int r1 = getIntInput("Corner 1 Row: ", 1, r) - 1;
-                int c1 = getIntInput("Corner 1 Col: ", 1, c) - 1;
-                int r2 = getIntInput("Corner 2 Row: ", 1, r) - 1;
-                int c2 = getIntInput("Corner 2 Col: ", 1, c) - 1;
-                int minR = min(r1, r2), maxR = max(r1, r2);
-                int minC = min(c1, c2), maxC = max(c1, c2);
-                for (int i = minR; i <= maxR; ++i)
-                    for (int j = minC; j <= maxC; ++j)
-                        if (tool == 2 || i == minR || i == maxR || j == minC || j == maxC)
-                            placeTile(i, j);
-            }
-            else if (tool == 4) {
-                int rc = getIntInput("Center Row: ", 1, r) - 1;
-                int cc = getIntInput("Center Col: ", 1, c) - 1;
-                int rad = getIntInput("Radius: ", 0, max(r, c));
-                for (int i = 0; i < r; ++i)
-                    for (int j = 0; j < c; ++j)
-                        if ((i - rc) * (i - rc) + (j - cc) * (j - cc) <= rad * rad)
-                            placeTile(i, j);
+                if (tool == "single" || tool == "1") {
+                    int r = getIntInput("Row: ") - 1;
+                    int c = getIntInput("Col: ") - 1;
+                    placeTile(r, c);
+                }
+                else if (tool == "rect" || tool == "hollow" || tool == "2" || tool == "3") {
+                    int r1 = getIntInput("Corner 1 Row: ") - 1;
+                    int c1 = getIntInput("Corner 1 Col: ") - 1;
+                    int r2 = getIntInput("Corner 2 Row: ") - 1;
+                    int c2 = getIntInput("Corner 2 Col: ") - 1;
+
+                    int minR = min(r1, r2), maxR = max(r1, r2);
+                    int minC = min(c1, c2), maxC = max(c1, c2);
+
+                    for (int i = minR; i <= maxR; ++i) {
+                        for (int j = minC; j <= maxC; ++j) {
+                            if (tool == "rect" || tool == "2") placeTile(i, j);
+                            else {
+                                if (i == minR || i == maxR || j == minC || j == maxC) placeTile(i, j);
+                            }
+                        }
+                    }
+                }
+                else if (tool == "circle" || tool == "4") {
+                    int rc = getIntInput("Center Row: ") - 1;
+                    int cc = getIntInput("Center Col: ") - 1;
+                    int rad = getIntInput("Radius: ");
+                    for (int i = 0; i < d.rows; ++i) {
+                        for (int j = 0; j < d.cols; ++j) {
+                            if ((i - rc) * (i - rc) + (j - cc) * (j - cc) <= rad * rad) {
+                                placeTile(i, j);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
+    bool loadDungeonFromFile(const string& filepath, Dungeon& outDungeon) {
+        ifstream inFile(filepath);
+        if (!inFile.is_open()) {
+            cout << "[!] Error: Could not open file '" << filepath << "'. Ensure the path is correct.\n";
+            return false;
+        }
 
-    //  DEFAULT DUNGEONS
+        string name;
+        getline(inFile, name);
+        
+        int r, c;
+        if (!(inFile >> r >> c)) {
+            cout << "[!] Error: Invalid file format.\n";
+            return false;
+        }
 
+        outDungeon.name = name;
+        outDungeon.rows = r;
+        outDungeon.cols = c;
+        outDungeon.grid = vector<vector<Tile>>(r, vector<Tile>(c));
+
+        for (int i = 0; i < r; ++i) {
+            for (int j = 0; j < c; ++j) {
+                int typeInt;
+                Tile t;
+                string text;
+                if (!(inFile >> typeInt >> t.hp >> t.str >> t.def >> t.value >> t.targetX >> t.targetY >> text)) {
+                    cout << "[!] Error: Invalid file format while reading tiles.\n";
+                    return false;
+                }
+                t.type = static_cast<TileType>(typeInt);
+                if (text == "_") {
+                    t.text = "";
+                } else {
+                    for (int k = 0; k < text.length(); ++k) {
+                        if (text[k] == '_') text[k] = ' ';
+                    }
+                    t.text = text;
+                }
+                outDungeon.grid[i][j] = t;
+            }
+        }
+        inFile.close();
+        return true;
+    }
+
+    void saveDungeonToFile(const Dungeon& d) {
+        // 1. Create filename from the dungeon name with a .dun extension
+        string filename = d.name + ".dun";
+
+        // Ask the user for a path in their storage to save the file
+        string path = getRawStringInput("Enter the folder path to save to storage (e.g. C:\\Dungeons) or leave blank for default: ");
+        string fullPath = filename;
+        if (!path.empty()) {
+            if (path.back() != '\\' && path.back() != '/') {
+                path += "\\";
+            }
+            fullPath = path + filename;
+        }
+
+        // 2. Open the file for writing
+        ofstream outFile(fullPath);
+        if (!outFile.is_open()) {
+            cout << "[!] Error: Could not open file '" << fullPath << "' for writing. Ensure the directory exists.\n";
+            return;
+        }
+
+        // 3. Write dungeon metadata (name, rows, cols)
+        outFile << d.name << "\n";
+        outFile << d.rows << " " << d.cols << "\n";
+
+        // 4. Write all tile data for the entire grid
+        for (int i = 0; i < d.rows; ++i) {
+            for (int j = 0; j < d.cols; ++j) {
+                const Tile& t = d.grid[i][j];
+                string sanitized_text = t.text;
+
+                // Replace spaces with underscores for easier file parsing later
+                for (int k = 0; k < sanitized_text.length(); ++k) {
+                    if (sanitized_text[k] == ' ') sanitized_text[k] = '_';
+                }
+                if (sanitized_text.empty()) sanitized_text = "_"; // Use placeholder for empty text
+
+                outFile << static_cast<int>(t.type) << " "
+                        << t.hp << " "
+                        << t.str << " "
+                        << t.def << " "
+                        << t.value << " "
+                        << t.targetX << " "
+                        << t.targetY << " "
+                        << sanitized_text << "\n";
+            }
+        }
+        outFile.close();
+        cout << "Dungeon was also saved to storage: " << fullPath << "\n";
+    }
 
     void loadDefaultDungeons() {
-        // ---- DUNGEON 1: MUNYLU ----
         Dungeon d1;
         d1.name = "MUNYLU";
         d1.rows = 10; d1.cols = 10;
-        d1.grid = vector<vector<TileType>>(d1.rows, vector<TileType>(d1.cols, TileType::EMPTY));
-        for (int i = 0; i < d1.rows; ++i)
-            for (int j = 0; j < d1.cols; ++j)
+        d1.grid = vector<vector<Tile>>(d1.rows, vector<Tile>(d1.cols));
+
+        for (int i = 0; i < d1.rows; ++i) {
+            for (int j = 0; j < d1.cols; ++j) {
                 if (i == 0 || i == d1.rows - 1 || j == 0 || j == d1.cols - 1)
-                    d1.grid[i][j] = TileType::WALL;
+                    d1.grid[i][j].type = TileType::WALL;
+            }
+        }
 
-        d1.grid[1][1] = TileType::PLAYER;
-        d1.grid[1][8] = TileType::GOAL;
+        d1.grid[1][1].type = TileType::PLAYER;
+        d1.grid[1][8].type = TileType::GOAL;
 
-        // Correct {col, row} keys for lockTypes
-        d1.grid[2][3] = TileType::KEY;
-        d1.lockTypes[{3, 2}] = "red";   // key at row=2, col=3 → {col,row} = {3,2}
+        d1.grid[2][3].type = TileType::KEY;
+        d1.grid[2][3].text = "red";
 
-        d1.grid[3][5] = TileType::DOOR;
-        d1.lockTypes[{5, 3}] = "red";   // door at row=3, col=5 → {col,row} = {5,3}
+        d1.grid[3][5].type = TileType::DOOR;
+        d1.grid[3][5].text = "red";
 
-        d1.grid[4][4] = TileType::ENEMY;
-        d1.enemyStats[{4, 4}] = { 20, 5, 2 };
+        d1.grid[4][4].type = TileType::ENEMY;
+        d1.grid[4][4].hp = 20; d1.grid[4][4].str = 5; d1.grid[4][4].def = 2;
 
-        d1.grid[3][1] = TileType::HP_POT;
-        d1.potionValues[{1, 3}] = 25;
+        d1.grid[3][1].type = TileType::HP_POT;
+        d1.grid[3][1].value = 25;
 
-        d1.grid[5][2] = TileType::STR_POT;
-        d1.potionValues[{2, 5}] = 3;
+        d1.grid[5][2].type = TileType::STR_POT;
+        d1.grid[5][2].value = 3;
 
-        d1.grid[7][4] = TileType::DEF_POT;
-        d1.potionValues[{4, 7}] = 4;
+        d1.grid[7][4].type = TileType::DEF_POT;
+        d1.grid[7][4].value = 4;
 
-
+        dungeons.push_back(d1);
 
         Dungeon d2;
         d2.name = "Georgina's Trial";
         d2.rows = 7; d2.cols = 7;
-        d2.grid = vector<vector<TileType>>(d2.rows, vector<TileType>(d2.cols, TileType::EMPTY));
-        for (int i = 0; i < d2.rows; ++i)
-            for (int j = 0; j < d2.cols; ++j)
+        d2.grid = vector<vector<Tile>>(d2.rows, vector<Tile>(d2.cols));
+
+        for (int i = 0; i < d2.rows; ++i) {
+            for (int j = 0; j < d2.cols; ++j) {
                 if (i == 0 || i == d2.rows - 1 || j == 0 || j == d2.cols - 1)
-                    d2.grid[i][j] = TileType::WALL;
-
-        d2.grid[1][1] = TileType::PLAYER;
-        d2.grid[1][3] = TileType::ENEMY;
-        d2.enemyStats[{3, 1}] = { 15, 6, 1 };
-
-        d2.grid[1][5] = TileType::TELEPORTER;
-        d2.grid[2][3] = TileType::WALL;
-        d2.grid[2][5] = TileType::WALL;
-
-        d2.grid[3][1] = TileType::KEY;
-        d2.lockTypes[{1, 3}] = "blue";
-
-        d2.grid[3][3] = TileType::DOOR;
-        d2.lockTypes[{3, 3}] = "blue";
-
-        d2.grid[3][5] = TileType::GOAL;
-
-        // Lava river
-        for (int j = 1; j <= 3; ++j) {
-            d2.grid[4][j] = TileType::DAMAGE_FLOOR;
-            d2.damageFloorTypes[{j, 4}] = "lava";
+                    d2.grid[i][j].type = TileType::WALL;
+            }
         }
 
-        d2.grid[5][1] = TileType::TELEPORTER;
-        d2.grid[5][3] = TileType::DEF_POT;
-        d2.potionValues[{3, 5}] = 5;
-        d2.grid[5][5] = TileType::STR_POT;
-        d2.potionValues[{5, 5}] = 3;
+        d2.grid[1][1].type = TileType::PLAYER;
 
-        d2.teleporters[{5, 1}] = { 1, 5 };
-        d2.teleporters[{1, 5}] = { 5, 1 };
+        d2.grid[1][3].type = TileType::ENEMY;
+        d2.grid[1][3].hp = 15; d2.grid[1][3].str = 6; d2.grid[1][3].def = 1;
 
-        dungeons.push_back(d1);
+        d2.grid[2][3].type = TileType::WALL;
+        d2.grid[2][5].type = TileType::WALL;
+
+        d2.grid[3][1].type = TileType::KEY;
+        d2.grid[3][1].text = "blue";
+
+        d2.grid[3][3].type = TileType::DOOR;
+        d2.grid[3][3].text = "blue";
+
+        d2.grid[3][5].type = TileType::GOAL;
+
+        d2.grid[4][1].type = TileType::DAMAGE_FLOOR; d2.grid[4][1].text = "lava"; d2.grid[4][1].value = 5;
+        d2.grid[4][2].type = TileType::DAMAGE_FLOOR; d2.grid[4][2].text = "lava"; d2.grid[4][2].value = 5;
+        d2.grid[4][3].type = TileType::DAMAGE_FLOOR; d2.grid[4][3].text = "lava"; d2.grid[4][3].value = 5;
+
+        d2.grid[5][3].type = TileType::DEF_POT;
+        d2.grid[5][3].value = 5;
+
+        d2.grid[5][5].type = TileType::STR_POT;
+        d2.grid[5][5].value = 3;
+
+        d2.grid[1][5].type = TileType::TELEPORTER;
+        d2.grid[1][5].targetX = 1; d2.grid[1][5].targetY = 5;
+        
+        d2.grid[5][1].type = TileType::TELEPORTER;
+        d2.grid[5][1].targetX = 5; d2.grid[5][1].targetY = 1;
+
         dungeons.push_back(d2);
     }
 
 public:
     GameManager() {
-        srand(static_cast<unsigned>(time(nullptr)));
         loadDefaultDungeons();
     }
 
     void run() {
         while (true) {
-            cout << "\n====================================\n";
-            cout << "       Welcome to Magic Tower!\n";
-            cout << "===================================\n";
-            cout << " 1) Enter a Dungeon  (or 'play')\n";
-            cout << " 2) Level Editor     (or 'edit')\n";
-            cout << " 3) Autoplay Mode    (or 'autoplay')\n";
-            cout << " 4) Exit             (or 'quit')\n";
+            cout << "\nWelcome to Magic Tower:\n";
+            cout << " 1 - play\n";
+            cout << " 2 - editor\n";
+            cout << " 3 - exit\n";
 
-            map<string, int> mainOpts = {
-                {"play",1},{"dungeon",1},{"enter",1},
-                {"edit",2},{"editor",2},
-                {"autoplay",3},{"auto",3},
-                {"quit",4},{"exit",4}
-            };
-            int choice = getChoiceInput("Select an option: ", mainOpts);
-
-            if (choice == 1) loadDungeonMenu();
-            else if (choice == 2) launchLevelEditor();
-            else if (choice == 3) autoplayMenu();
-            else { cout << "Exiting. Goodbye!\n"; break; }
+            string choice = getStringInput("Select an option: ");
+            if (choice == "play" || choice == "1") {
+                loadDungeonMenu();
+            }
+            else if (choice == "editor" || choice == "2") {
+                launchLevelEditor();
+            }
+            else if (choice == "exit" || choice == "3") {
+                cout << "Exiting program. Goodbye!\n";
+                break;
+            } else {
+                cout << "Invalid option. Type 'play', 'editor', 'exit' or their number.\n";
+            }
         }
     }
 };
 
-
-//  ENTRY POINT
-
-
+// main
 int main() {
     GameManager game;
     game.run();
